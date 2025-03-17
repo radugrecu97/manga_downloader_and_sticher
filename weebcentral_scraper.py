@@ -11,6 +11,7 @@ import time
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+from selenium.webdriver.support.ui import WebDriverWait
 
 # Set up logging
 logging.basicConfig(
@@ -23,18 +24,32 @@ logger = logging.getLogger(__name__)
 class WeebCentralScraper:
     def __init__(self, manga_url, chapter_range=None, output_dir="downloads", delay=1, max_threads=4):
         self.base_url = "https://weebcentral.com"
-        # Add https:// if no scheme is provided
         if not manga_url.startswith(('http://', 'https://')):
             manga_url = 'https://' + manga_url
         self.manga_url = manga_url
-        self.chapter_range = chapter_range  # Can be None (all), single number, or tuple (start, end)
+        self.chapter_range = chapter_range
         self.output_dir = output_dir
         self.delay = delay
         self.max_threads = max_threads
-        self.chapters = []  # Store chapters list for reference
+        
+        # Enhanced headers
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Sec-Fetch-Dest': 'image',
+            'Sec-Fetch-Mode': 'no-cors',
+            'Sec-Fetch-Site': 'cross-site',
+            'Pragma': 'no-cache',
+            'Cache-Control': 'no-cache',
         }
+        
+        # Create a session for persistent connections
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+        self.chapters = []  # Store chapters list for reference
         self.progress_callback = None
         self.stop_flag = lambda: False
 
@@ -92,40 +107,37 @@ class WeebCentralScraper:
         return chapters
 
     def get_chapter_images(self, chapter_url):
-        """Use Selenium to get all image URLs from a chapter"""
+        """Get list of image URLs for a chapter"""
+        logger.info("Loading page with Selenium...")
+        
         options = webdriver.ChromeOptions()
         options.add_argument('--headless')
         options.add_argument('--disable-gpu')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
+        options.add_argument(f'user-agent={self.headers["User-Agent"]}')
         
         driver = webdriver.Chrome(options=options)
+        
         try:
-            logger.info("Loading page with Selenium...")
             driver.get(chapter_url)
+            time.sleep(3)  # Wait for JavaScript to load
             
-            # Wait for the page to load
-            time.sleep(3)
-            
-            # Scroll to bottom multiple times to trigger lazy loading
-            last_height = driver.execute_script("return document.body.scrollHeight")
-            while True:
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(2)
-                
-                new_height = driver.execute_script("return document.body.scrollHeight")
-                if new_height == last_height:
-                    break
-                last_height = new_height
+            # Wait for images to load
+            WebDriverWait(driver, 10).until(
+                lambda x: x.find_elements(By.CSS_SELECTOR, "img[src*='/manga/']")
+            )
             
             # Get all image elements
+            image_elements = driver.find_elements(By.CSS_SELECTOR, "img[src*='/manga/']")
             image_urls = []
-            images = driver.find_elements(By.TAG_NAME, "img")
-            for img in images:
-                url = img.get_attribute('src') or img.get_attribute('data-src')
+            
+            for img in image_elements:
+                url = img.get_attribute('src')
                 if url and not url.startswith('data:'):
                     image_urls.append(url)
             
+            logger.info(f"Found {len(image_urls)} images")
             return image_urls
             
         finally:
@@ -141,16 +153,42 @@ class WeebCentralScraper:
             if not img_url.startswith(('http://', 'https://')):
                 img_url = urljoin(chapter_url, img_url)
 
-            img_response = requests.get(img_url, headers=self.headers)
-            img_response.raise_for_status()
-            
-            with open(filepath, 'wb') as f:
-                f.write(img_response.content)
-            logger.info(f"Successfully downloaded: {os.path.basename(filepath)}")
-            return True
-            
+            # Add referer header for this specific request
+            headers = self.headers.copy()
+            headers['Referer'] = chapter_url
+
+            # Try multiple times with increasing delays
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    img_response = self.session.get(
+                        img_url,
+                        headers=headers,
+                        timeout=10,
+                        allow_redirects=True
+                    )
+                    img_response.raise_for_status()
+                    
+                    # Verify we got an image
+                    content_type = img_response.headers.get('content-type', '')
+                    if not content_type.startswith('image/'):
+                        raise ValueError(f"Received non-image content-type: {content_type}")
+
+                    with open(filepath, 'wb') as f:
+                        f.write(img_response.content)
+                    logger.info(f"Successfully downloaded: {os.path.basename(filepath)}")
+                    return True
+
+                except requests.exceptions.RequestException as e:
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 2  # Progressive delay: 2s, 4s, 6s
+                        logger.warning(f"Attempt {attempt + 1} failed, retrying in {wait_time}s: {str(e)}")
+                        time.sleep(wait_time)
+                    else:
+                        raise
+
         except Exception as e:
-            logger.error(f"Failed to download {os.path.basename(filepath)}: {e}")
+            logger.error(f"Failed to download {os.path.basename(filepath)}: {str(e)}")
             return False
 
     def download_chapter(self, chapter):
