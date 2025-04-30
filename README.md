@@ -11,7 +11,7 @@ A powerful and user-friendly manga downloader specifically designed for WeebCent
 - **Checkpoint System**: Resume interrupted downloads
 - **Smart Naming**: Automatic folder organization with clean naming
 - **Error Handling**: Robust error recovery and logging system
-
+- **Google Colab Support**: Run directly in Google Colab for cloud-based downloading
 ## Installation
 
 1. Clone the repository:
@@ -26,6 +26,15 @@ pip install -r requirements.txt
 ```
 
 ## Usage
+
+### Google Colab (Recommended)
+Run the scraper directly in Google Colab:
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Yui007/weebcentral_downloader/blob/main/colab_run.ipynb)
+
+1. Click the "Open in Colab" button above
+2. Run the cells in order
+3. Follow the prompts to download your manga
+4. Use the provided compression tools for easier downloading
 
 ### GUI Version
 Run the graphical interface:
