@@ -10,10 +10,11 @@ def fetch_wikipedia_chapter_list(url):
     """
     Fetches and parses the Wikipedia page to get a mapping of volumes to chapter numbers.
     """
-    print(f"Fetching chapter list from {url}...")
+    print(f"DEBUG: Starting fetch_wikipedia_chapter_list for URL: {url}")
     try:
         response = requests.get(url, timeout=15)
         response.raise_for_status()
+        print(f"DEBUG: Successfully fetched URL. Status code: {response.status_code}")
     except requests.RequestException as e:
         print(f"Error fetching URL: {e}")
         return None
@@ -23,50 +24,99 @@ def fetch_wikipedia_chapter_list(url):
     
     main_table = soup.find('table', class_='wikitable')
     if not main_table:
-        print("Could not find the main wikitable on the page.")
+        print("DEBUG: Could not find the main table with class 'wikitable'.")
+        return None
+    else:
+        print("DEBUG: Found a table with class 'wikitable'.")
+
+    current_volume_number_str = "N/A" 
+    current_volume_name = "N/A" 
+
+    # MODIFICATION HERE: Remove recursive=False or search within tbody
+    # Option 1: Search recursively (simpler, might get too much if table is complex)
+    rows = main_table.find_all('tr') 
+    # Option 2: Specifically look for tbody (more robust if tbody is always present)
+    # tbody = main_table.find('tbody')
+    # if tbody:
+    #     rows = tbody.find_all('tr', recursive=False) # Get direct <tr> of tbody
+    # else:
+    #     print("DEBUG: No <tbody> found in main_table. Falling back to recursive search for <tr>.")
+    #     rows = main_table.find_all('tr') # Fallback if no tbody
+    
+    print(f"DEBUG: Found {len(rows)} <tr> elements (searched recursively from main_table).")
+    
+    if not rows:
+        print("DEBUG: No <tr> elements found even with recursive search. This is highly unexpected if table exists.")
         return None
 
-    current_volume_number = 0
-    current_volume_name = ""
-
-    rows = main_table.find_all('tr', recursive=False)
-    
+    row_counter = 0
     for row in rows:
+        row_counter += 1
+        # print(f"DEBUG: Processing row {row_counter}...")
+        
         volume_header_th = row.find('th', scope='row', id=lambda x: x and x.startswith('vol'))
+        
         if volume_header_th:
+            current_volume_number_str = volume_header_th.get_text(strip=True)
             try:
-                current_volume_number = int(volume_header_th.get_text(strip=True))
+                current_volume_number = int(current_volume_number_str)
                 current_volume_name = f"Volume {current_volume_number}"
                 volume_map[current_volume_name] = set()
+                print(f"DEBUG: Identified Volume Header: '{current_volume_name}' from text '{current_volume_number_str}' in row {row_counter}.")
             except ValueError:
-                continue
-            continue
+                print(f"DEBUG: Could not parse volume number from '{current_volume_number_str}' in row {row_counter}. Skipping this as volume header.")
+                current_volume_name = "N/A (Parse Error)"
+            # Important: After identifying a volume header, we should check if the *same row* contains chapter <ol>s
+            # or if they are consistently in the *next* row.
+            # For the JJK page, chapter <ol>s are in a DIFFERENT <tr> that follows the volume header <tr>.
+            # So, if this row IS a volume header, we 'continue' to the next row to look for its chapters.
+            continue 
 
-        if current_volume_name and current_volume_name in volume_map:
-            chapter_ols = row.find_all('ol')
+        # This part of the logic assumes chapters are in a SEPARATE row from the volume header.
+        if current_volume_name != "N/A" and current_volume_name in volume_map:
+            chapter_ols = row.find_all('ol') 
+            
             if chapter_ols:
-                for ol in chapter_ols:
+                # print(f"DEBUG: Found {len(chapter_ols)} <ol> tags in row {row_counter} for {current_volume_name}.")
+                for ol_index, ol in enumerate(chapter_ols):
                     start_chapter_str = ol.get('start')
                     if start_chapter_str:
                         try:
                             start_chapter_num = int(start_chapter_str)
                         except ValueError:
+                            print(f"DEBUG: Could not parse 'start' attribute '{start_chapter_str}' from <ol> tag in row {row_counter}, <ol> index {ol_index}. Skipping this <ol>.")
                             continue
-                    else: # Fallback, though 'start' should usually be present
-                        start_chapter_num = 1
+                    else: 
+                        print(f"DEBUG: <ol> tag in row {row_counter}, <ol> index {ol_index}, has no 'start' attribute. Inferring start.")
                         if volume_map[current_volume_name]:
                            start_chapter_num = max(volume_map[current_volume_name], default=0) + 1
+                        else:
+                           start_chapter_num = 1 
+                           print(f"DEBUG: No chapters yet for {current_volume_name}, defaulting inferred start to 1 for this <ol>.")
                     
-                    lis = ol.find_all('li', recursive=False)
+                    lis = ol.find_all('li', recursive=False) 
+                    # print(f"DEBUG: Found {len(lis)} <li> tags in <ol> (start={start_chapter_num}) for {current_volume_name}.")
                     for i, li_tag in enumerate(lis):
                         current_li_chapter_num = start_chapter_num + i
                         volume_map[current_volume_name].add(current_li_chapter_num)
-    
+                        # print(f"DEBUG: Added Chapter {current_li_chapter_num} to {current_volume_name}.")
+                # After processing <ol>s in this row for the current volume, 
+                # we should ideally reset current_volume_name or have a way to know
+                # that the next row isn't also chapters for *this* volume, unless it's another <ol> row.
+                # The current structure relies on a new volume header resetting the context.
+                # This is generally okay if chapter lists for a single volume don't span multiple <tr> tags
+                # AND a summary row doesn't contain accidental <ol> tags.
+
     if not volume_map:
-        print("No volumes found or parsed. Check Wikipedia page structure.")
+        print("DEBUG: volume_map is empty after processing all rows.")
+        any_vol_id = soup.find(lambda tag: tag.name == 'th' and tag.has_attr('id') and tag['id'].startswith('vol'))
+        if any_vol_id:
+            print("DEBUG: Found at least one element with an ID like 'volX', but it wasn't processed as a volume header. Check row iteration logic or volume header identification.")
+        else:
+            print("DEBUG: Did not find any element with an ID like 'volX'. The page structure might be different than expected.")
         return None
         
-    print(f"Successfully parsed {len(volume_map)} volumes from Wikipedia.")
+    print(f"DEBUG: Successfully parsed {len(volume_map)} volumes. Final map keys: {list(volume_map.keys())}")
     return volume_map
 
 def get_local_chapters(chapter_dir):
