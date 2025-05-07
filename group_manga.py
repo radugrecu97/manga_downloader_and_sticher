@@ -1,0 +1,289 @@
+import os
+import re
+import shutil
+import argparse
+import requests
+from bs4 import BeautifulSoup
+from collections import defaultdict
+
+def fetch_wikipedia_chapter_list(url):
+    """
+    Fetches and parses the Wikipedia page to get a mapping of volumes to chapter numbers.
+    """
+    print(f"Fetching chapter list from {url}...")
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        print(f"Error fetching URL: {e}")
+        return None
+
+    soup = BeautifulSoup(response.content, 'html.parser')
+    volume_map = {} # E.g., {"Volume 1": {1, 2, ...}, "Volume 2": {8, 9, ...}}
+    
+    main_table = soup.find('table', class_='wikitable')
+    if not main_table:
+        print("Could not find the main wikitable on the page.")
+        return None
+
+    current_volume_number = 0
+    current_volume_name = ""
+
+    rows = main_table.find_all('tr', recursive=False)
+    
+    for row in rows:
+        volume_header_th = row.find('th', scope='row', id=lambda x: x and x.startswith('vol'))
+        if volume_header_th:
+            try:
+                current_volume_number = int(volume_header_th.get_text(strip=True))
+                current_volume_name = f"Volume {current_volume_number}"
+                volume_map[current_volume_name] = set()
+            except ValueError:
+                continue
+            continue
+
+        if current_volume_name and current_volume_name in volume_map:
+            chapter_ols = row.find_all('ol')
+            if chapter_ols:
+                for ol in chapter_ols:
+                    start_chapter_str = ol.get('start')
+                    if start_chapter_str:
+                        try:
+                            start_chapter_num = int(start_chapter_str)
+                        except ValueError:
+                            continue
+                    else: # Fallback, though 'start' should usually be present
+                        start_chapter_num = 1
+                        if volume_map[current_volume_name]:
+                           start_chapter_num = max(volume_map[current_volume_name], default=0) + 1
+                    
+                    lis = ol.find_all('li', recursive=False)
+                    for i, li_tag in enumerate(lis):
+                        current_li_chapter_num = start_chapter_num + i
+                        volume_map[current_volume_name].add(current_li_chapter_num)
+    
+    if not volume_map:
+        print("No volumes found or parsed. Check Wikipedia page structure.")
+        return None
+        
+    print(f"Successfully parsed {len(volume_map)} volumes from Wikipedia.")
+    return volume_map
+
+def get_local_chapters(chapter_dir):
+    """
+    Scans the directory for chapter folders and extracts their numbers.
+    Returns a dictionary mapping original folder name to its float chapter number,
+    and a set of integer base chapter numbers found locally.
+    """
+    print(f"\nScanning local chapter directory: {chapter_dir}...")
+    if not os.path.isdir(chapter_dir):
+        print(f"Error: Chapter directory '{chapter_dir}' not found.")
+        return None, None
+
+    local_chapters_raw = {} # "Chapter 1": 1.0, "Chapter 2.5": 2.5
+    local_chapter_base_numbers = set() # {1, 2}
+
+    for item in os.listdir(chapter_dir):
+        item_path = os.path.join(chapter_dir, item)
+        if os.path.isdir(item_path) and not item.lower().startswith("volume"): # Avoid processing already created volume folders
+            match = re.match(r"Chapter\s*([\d\.]+)", item, re.IGNORECASE)
+            if match:
+                try:
+                    num_str = match.group(1)
+                    num_float = float(num_str)
+                    local_chapters_raw[item] = num_float
+                    local_chapter_base_numbers.add(int(num_float))
+                except ValueError:
+                    print(f"Warning: Could not parse chapter number from folder '{item}'")
+    
+    print(f"Found {len(local_chapters_raw)} chapter folders locally.")
+    if not local_chapters_raw:
+        print("No chapter folders like 'Chapter X' found.")
+    return local_chapters_raw, local_chapter_base_numbers
+
+def confirm_user(prompt_message):
+    """Helper function to get yes/no confirmation from the user."""
+    while True:
+        choice = input(f"{prompt_message} (yes/no): ").strip().lower()
+        if choice == 'yes':
+            return True
+        elif choice == 'no':
+            return False
+        print("Invalid input. Please enter 'yes' or 'no'.")
+
+def print_wikipedia_map(volume_map_wiki):
+    """Prints the parsed Wikipedia chapter map for user review."""
+    print("\n--- Parsed Wikipedia Chapter Map ---")
+    if not volume_map_wiki:
+        print("No data from Wikipedia.")
+        return
+    for vol_name, chap_set in sorted(volume_map_wiki.items()):
+        print(f"{vol_name}: Chapters {', '.join(map(str, sorted(list(chap_set))))}")
+    print("--- End of Wikipedia Map ---")
+
+def confirm_grouping_and_discrepancies(volume_map_wiki, local_chapters_raw, all_local_base_numbers):
+    """
+    Guides the user through confirming chapter groupings and reports discrepancies.
+    Returns a map of folders to move if confirmed, otherwise None.
+    """
+    # Create reverse map: chapter_base_num -> volume_name from Wikipedia
+    wiki_chapter_to_volume_map = {}
+    for vol_name, chap_set in volume_map_wiki.items():
+        for chap_num in chap_set:
+            wiki_chapter_to_volume_map[chap_num] = vol_name
+
+    proposed_grouping_exact = defaultdict(list)
+    proposed_grouping_assignable = defaultdict(list)
+    unknown_local_chapter_folders = {} # folder_name -> float_chapter_num
+
+    for folder_name, local_chap_float in local_chapters_raw.items():
+        local_chap_base = int(local_chap_float)
+        
+        if local_chap_base in wiki_chapter_to_volume_map:
+            target_volume = wiki_chapter_to_volume_map[local_chap_base]
+            if local_chap_base == local_chap_float: # e.g. Chapter 5 (is 5.0)
+                proposed_grouping_exact[target_volume].append(folder_name)
+            else: # e.g. Chapter 5.5, and base Chapter 5 is on Wikipedia
+                proposed_grouping_assignable[target_volume].append(folder_name)
+        else:
+            unknown_local_chapter_folders[folder_name] = local_chap_float
+            
+    print("\n--- Proposed Chapter Grouping (Step 1/2) ---")
+    final_folders_to_move = defaultdict(list)
+    
+    if proposed_grouping_exact:
+        print("\nLocal chapters with EXACT base match to Wikipedia (will be grouped by default):")
+        for vol, folders in sorted(proposed_grouping_exact.items()):
+            print(f"  {vol}:")
+            for folder in sorted(folders):
+                print(f"    - '{folder}'")
+            final_folders_to_move[vol].extend(folders)
+    else:
+        print("\nNo local chapters found with an exact base match to Wikipedia.")
+
+    if proposed_grouping_assignable:
+        print("\nLocal chapters with DECIMAL numbers (e.g., 'Chapter X.Y') where base 'X' IS on Wikipedia:")
+        for vol, folders in sorted(proposed_grouping_assignable.items()):
+            print(f"  For {vol} (based on their integer part):")
+            for folder in sorted(folders):
+                print(f"    - '{folder}'")
+        
+        if confirm_user("Do you want to include these decimal chapters in the grouping as shown above?"):
+            for vol, folders in proposed_grouping_assignable.items():
+                final_folders_to_move[vol].extend(folders)
+            print("Decimal chapters will be included in the grouping.")
+        else:
+            print("Decimal chapters will NOT be included and will be treated as 'unknown'.")
+            for folders_list in proposed_grouping_assignable.values():
+                for folder in folders_list:
+                    unknown_local_chapter_folders[folder] = local_chapters_raw[folder]
+    else:
+        print("\nNo local chapters with assignable decimal numbers found.")
+
+    print("\n--- Discrepancy Report (Step 2/2) ---")
+    
+    missing_locally_report = defaultdict(list)
+    if all_local_base_numbers is not None:
+        for vol_name, wiki_chap_set in volume_map_wiki.items():
+            for wiki_chap_num in wiki_chap_set:
+                if wiki_chap_num not in all_local_base_numbers:
+                    missing_locally_report[vol_name].append(wiki_chap_num)
+
+    if missing_locally_report:
+        print("\nINFO: The following chapters are listed on Wikipedia, but NO local folder (even decimal) has this base number:")
+        for vol, chaps in sorted(missing_locally_report.items()):
+            print(f"  {vol}: Chapters {', '.join(map(str, sorted(list(chaps))))}")
+    else:
+        print("\nINFO: All chapters listed on Wikipedia appear to have a corresponding local folder (based on integer part).")
+
+    if unknown_local_chapter_folders:
+        print("\nWARNING: The following local chapters are UNKNOWN or were NOT confirmed for grouping:")
+        print("These will NOT be moved.")
+        for folder, num in sorted(unknown_local_chapter_folders.items()):
+            print(f"  - Folder '{folder}' (parsed as Chapter {num})")
+    else:
+        print("\nINFO: All found local chapters were either proposed for grouping or are not present.")
+        
+    if not final_folders_to_move:
+        print("\nNo chapters are slated for grouping. Nothing to move.")
+        return None
+        
+    print("\n--- Summary of Folders to be Moved ---")
+    for vol_name, folders in sorted(final_folders_to_move.items()):
+        print(f"{vol_name}:")
+        for folder in sorted(folders):
+            print(f"  - '{folder}'")
+            
+    if confirm_user("Proceed with creating volume folders and moving these chapters?"):
+        return final_folders_to_move
+    else:
+        return None
+
+def organize_chapters(chapter_dir, final_assignment):
+    """
+    Creates volume folders and moves chapter folders into them.
+    """
+    print("\n--- Organizing Chapters ---")
+    if not final_assignment:
+        print("No assignments to process. Nothing will be moved.")
+        return
+
+    for volume_name, chapter_folders in final_assignment.items():
+        volume_path = os.path.join(chapter_dir, volume_name)
+        os.makedirs(volume_path, exist_ok=True)
+        print(f"Created/Ensured directory: {volume_path}")
+
+        for folder_name in chapter_folders:
+            source_path = os.path.join(chapter_dir, folder_name)
+            destination_path = os.path.join(volume_path, folder_name)
+
+            if os.path.exists(source_path):
+                try:
+                    print(f"Moving '{source_path}' to '{destination_path}'")
+                    shutil.move(source_path, destination_path)
+                except Exception as e:
+                    print(f"Error moving '{source_path}': {e}")
+            else:
+                print(f"Warning: Source folder '{source_path}' not found for moving.")
+    print("\nChapter organization complete.")
+
+def main():
+    parser = argparse.ArgumentParser(description="Organize manga chapter folders into volumes based on Wikipedia.")
+    parser.add_argument("wiki_url", help="URL of the Wikipedia page listing manga chapters.")
+    parser.add_argument("chapter_dir", help="Path to the directory containing chapter folders (e.g., 'Chapter 1', 'Chapter 2').")
+    
+    args = parser.parse_args()
+
+    # STAGE 1: WIKIPEDIA DATA
+    volume_map_wiki = fetch_wikipedia_chapter_list(args.wiki_url)
+    if not volume_map_wiki:
+        print("Failed to get chapter list from Wikipedia. Exiting.")
+        return
+    
+    print_wikipedia_map(volume_map_wiki)
+    if not confirm_user("Does the Wikipedia chapter mapping look correct?"):
+        print("Exiting based on user input.")
+        return
+
+    # STAGE 2: LOCAL DATA
+    local_chapters_raw, all_local_base_numbers = get_local_chapters(args.chapter_dir)
+    if not local_chapters_raw:
+        # Message already printed by get_local_chapters if no folders found
+        print("Exiting due to no local chapters found or directory issue.")
+        return
+
+    # STAGE 3: RECONCILIATION & PROPOSED GROUPING (includes its own confirmations)
+    folders_to_move_map = confirm_grouping_and_discrepancies(
+        volume_map_wiki, 
+        local_chapters_raw,
+        all_local_base_numbers
+    )
+
+    # STAGE 4: EXECUTION
+    if folders_to_move_map:
+        organize_chapters(args.chapter_dir, folders_to_move_map)
+    else:
+        print("\nNo chapter organization will be performed (either cancelled or no chapters to move).")
+
+if __name__ == "__main__":
+    main()
