@@ -143,7 +143,14 @@ def print_wikipedia_map(volume_map_wiki):
     if not volume_map_wiki:
         print("No data from Wikipedia.")
         return
-    for vol_name, chap_set in sorted(volume_map_wiki.items()):
+
+    def extract_vol_num(vol_name):
+        # Extracts the first integer found in the volume name for sorting
+        match = re.search(r'(\d+)', vol_name)
+        return int(match.group(1)) if match else float('inf')
+
+    for vol_name in sorted(volume_map_wiki.keys(), key=extract_vol_num):
+        chap_set = volume_map_wiki[vol_name]
         print(f"{vol_name}: Chapters {', '.join(map(str, sorted(list(chap_set))))}")
     print("--- End of Wikipedia Map ---")
 
