@@ -130,12 +130,12 @@ def get_local_chapters(chapter_dir):
 def confirm_user(prompt_message):
     """Helper function to get yes/no confirmation from the user."""
     while True:
-        choice = input(f"{prompt_message} (yes/no): ").strip().lower()
-        if choice == 'yes':
+        choice = input(f"{prompt_message} (yes/no, y/n): ").strip().lower()
+        if choice in ('yes', 'y'):
             return True
-        elif choice == 'no':
+        elif choice in ('no', 'n'):
             return False
-        print("Invalid input. Please enter 'yes' or 'no'.")
+        print("Invalid input. Please enter 'yes' or 'no' (or 'y'/'n').")
 
 def print_wikipedia_map(volume_map_wiki):
     """Prints the parsed Wikipedia chapter map for user review."""
