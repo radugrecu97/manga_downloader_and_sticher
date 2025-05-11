@@ -4,6 +4,7 @@ from PIL import Image
 import cv2
 import numpy as np
 import argparse
+import re
 
 # --- MOIRÉ REMOVAL & CALIBRATION SCRIPT FUNCTIONS ---
 
@@ -127,6 +128,10 @@ def process_and_save_moire_removed_image(input_image_path, output_image_path):
 
 # --- IMAGE WORKFLOW FUNCTIONS ---
 
+def natural_key(s):
+    """Sort helper: natural order for strings with numbers."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
 def is_grayscale(image_path):
     image = Image.open(image_path)
     if image.mode in ('RGB', 'RGBA'):
@@ -142,41 +147,48 @@ def is_grayscale(image_path):
     return False
 
 def process_images_in_folder(input_folder_path, output_folder_path):
-    os.makedirs(output_folder_path, exist_ok=True)
-    sorted_filenames = sorted(os.listdir(input_folder_path))
+    for root, dirs, files in os.walk(input_folder_path):
+        # Sort directories in-place for natural numeric order
+        dirs.sort(key=natural_key)
+        # Compute the relative path from the input_folder_path
+        rel_path = os.path.relpath(root, input_folder_path)
+        # Compute the corresponding output directory
+        output_dir = os.path.join(output_folder_path, rel_path) if rel_path != '.' else output_folder_path
+        os.makedirs(output_dir, exist_ok=True)
 
-    for filename in sorted_filenames:
-        input_path = os.path.join(input_folder_path, filename)
-        output_path = os.path.join(output_folder_path, filename)
+        sorted_filenames = sorted(files, key=natural_key)
+        for filename in sorted_filenames:
+            input_path = os.path.join(root, filename)
+            output_path = os.path.join(output_dir, filename)
 
-        if os.path.isfile(input_path):
-            print(f"Checking: {input_path}")
-            try:
+            if os.path.isfile(input_path):
+                print(f"Checking: {input_path}")
                 try:
-                    with Image.open(input_path) as test_img:
-                        test_img.verify()
-                except Exception:
-                    print(f"  Skipping non-image or corrupted file: {filename}")
-                    if not os.path.exists(output_path) or \
-                       os.path.getmtime(input_path) > os.path.getmtime(output_path):
-                        shutil.copy2(input_path, output_path)
-                    continue
+                    try:
+                        with Image.open(input_path) as test_img:
+                            test_img.verify()
+                    except Exception:
+                        print(f"  Skipping non-image or corrupted file: {filename}")
+                        if not os.path.exists(output_path) or \
+                           os.path.getmtime(input_path) > os.path.getmtime(output_path):
+                            shutil.copy2(input_path, output_path)
+                        continue
 
-                if is_grayscale(input_path):
-                    print(f"Processing grayscale image: {filename}")
-                    process_and_save_moire_removed_image(input_path, output_path)
-                else:
-                    print(f"  Non-grayscale image: {filename}. Copying directly.")
-                    if not os.path.exists(output_path) or \
-                       os.path.getmtime(input_path) > os.path.getmtime(output_path):
-                        shutil.copy2(input_path, output_path)
-                        print(f"    Copied: {filename} to {output_folder_path}")
+                    if is_grayscale(input_path):
+                        print(f"Processing grayscale image: {filename}")
+                        process_and_save_moire_removed_image(input_path, output_path)
                     else:
-                        print(f"    Skipped copying {filename}, output is newer or same.")
-            except Exception as e:
-                print(f"  Failed to process {filename}: {e}")
-                import traceback
-                traceback.print_exc()
+                        print(f"  Non-grayscale image: {filename}. Copying directly.")
+                        if not os.path.exists(output_path) or \
+                           os.path.getmtime(input_path) > os.path.getmtime(output_path):
+                            shutil.copy2(input_path, output_path)
+                            print(f"    Copied: {filename} to {output_dir}")
+                        else:
+                            print(f"    Skipped copying {filename}, output is newer or same.")
+                except Exception as e:
+                    print(f"  Failed to process {filename}: {e}")
+                    import traceback
+                    traceback.print_exc()
 
 if __name__ == "__main__":
     cli_parser = argparse.ArgumentParser(description="Process images: moiré removal for grayscales, calibration, copy others.")
