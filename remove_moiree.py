@@ -6,6 +6,7 @@ import numpy as np
 import argparse
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 # --- MOIRÉ REMOVAL & CALIBRATION SCRIPT FUNCTIONS ---
 
@@ -205,5 +206,8 @@ if __name__ == "__main__":
         print(f"Error: Input folder '{args.input_folder}' not found.")
         exit()
 
+    start_time = time.time()
     process_images_in_folder(args.input_folder, args.output_folder)
+    elapsed = time.time() - start_time
     print("\nProcessing complete.")
+    print(f"Total time: {elapsed:.2f} seconds.")
