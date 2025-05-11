@@ -6,7 +6,7 @@ import requests
 from bs4 import BeautifulSoup
 from collections import defaultdict
 
-def fetch_wikipedia_chapter_list(url):
+def fetch_wikipedia_chapter_list(url, volume_prefix="Volume "):
     """
     Fetches and parses the Wikipedia page to get a mapping of volumes to chapter numbers.
     """
@@ -32,16 +32,7 @@ def fetch_wikipedia_chapter_list(url):
     current_volume_number_str = "N/A" 
     current_volume_name = "N/A" 
 
-    # MODIFICATION HERE: Remove recursive=False or search within tbody
-    # Option 1: Search recursively (simpler, might get too much if table is complex)
     rows = main_table.find_all('tr') 
-    # Option 2: Specifically look for tbody (more robust if tbody is always present)
-    # tbody = main_table.find('tbody')
-    # if tbody:
-    #     rows = tbody.find_all('tr', recursive=False) # Get direct <tr> of tbody
-    # else:
-    #     print("DEBUG: No <tbody> found in main_table. Falling back to recursive search for <tr>.")
-    #     rows = main_table.find_all('tr') # Fallback if no tbody
     
     print(f"DEBUG: Found {len(rows)} <tr> elements (searched recursively from main_table).")
     
@@ -52,7 +43,6 @@ def fetch_wikipedia_chapter_list(url):
     row_counter = 0
     for row in rows:
         row_counter += 1
-        # print(f"DEBUG: Processing row {row_counter}...")
         
         volume_header_th = row.find('th', scope='row', id=lambda x: x and x.startswith('vol'))
         
@@ -60,24 +50,18 @@ def fetch_wikipedia_chapter_list(url):
             current_volume_number_str = volume_header_th.get_text(strip=True)
             try:
                 current_volume_number = int(current_volume_number_str)
-                current_volume_name = f"Volume {current_volume_number}"
+                current_volume_name = f"{volume_prefix}{current_volume_number}"
                 volume_map[current_volume_name] = set()
                 print(f"DEBUG: Identified Volume Header: '{current_volume_name}' from text '{current_volume_number_str}' in row {row_counter}.")
             except ValueError:
                 print(f"DEBUG: Could not parse volume number from '{current_volume_number_str}' in row {row_counter}. Skipping this as volume header.")
                 current_volume_name = "N/A (Parse Error)"
-            # Important: After identifying a volume header, we should check if the *same row* contains chapter <ol>s
-            # or if they are consistently in the *next* row.
-            # For the JJK page, chapter <ol>s are in a DIFFERENT <tr> that follows the volume header <tr>.
-            # So, if this row IS a volume header, we 'continue' to the next row to look for its chapters.
             continue 
 
-        # This part of the logic assumes chapters are in a SEPARATE row from the volume header.
         if current_volume_name != "N/A" and current_volume_name in volume_map:
             chapter_ols = row.find_all('ol') 
             
             if chapter_ols:
-                # print(f"DEBUG: Found {len(chapter_ols)} <ol> tags in row {row_counter} for {current_volume_name}.")
                 for ol_index, ol in enumerate(chapter_ols):
                     start_chapter_str = ol.get('start')
                     if start_chapter_str:
@@ -95,17 +79,9 @@ def fetch_wikipedia_chapter_list(url):
                            print(f"DEBUG: No chapters yet for {current_volume_name}, defaulting inferred start to 1 for this <ol>.")
                     
                     lis = ol.find_all('li', recursive=False) 
-                    # print(f"DEBUG: Found {len(lis)} <li> tags in <ol> (start={start_chapter_num}) for {current_volume_name}.")
                     for i, li_tag in enumerate(lis):
                         current_li_chapter_num = start_chapter_num + i
                         volume_map[current_volume_name].add(current_li_chapter_num)
-                        # print(f"DEBUG: Added Chapter {current_li_chapter_num} to {current_volume_name}.")
-                # After processing <ol>s in this row for the current volume, 
-                # we should ideally reset current_volume_name or have a way to know
-                # that the next row isn't also chapters for *this* volume, unless it's another <ol> row.
-                # The current structure relies on a new volume header resetting the context.
-                # This is generally okay if chapter lists for a single volume don't span multiple <tr> tags
-                # AND a summary row doesn't contain accidental <ol> tags.
 
     if not volume_map:
         print("DEBUG: volume_map is empty after processing all rows.")
@@ -269,7 +245,7 @@ def confirm_grouping_and_discrepancies(volume_map_wiki, local_chapters_raw, all_
     else:
         return None
 
-def organize_chapters(chapter_dir, final_assignment):
+def organize_chapters(chapter_dir, final_assignment, volume_prefix="Volume "):
     """
     Creates volume folders and moves chapter folders into them.
     """
@@ -279,7 +255,11 @@ def organize_chapters(chapter_dir, final_assignment):
         return
 
     for volume_name, chapter_folders in final_assignment.items():
-        volume_path = os.path.join(chapter_dir, volume_name)
+        if not volume_name.startswith(volume_prefix):
+            volume_folder = f"{volume_prefix}{volume_name}"
+        else:
+            volume_folder = volume_name
+        volume_path = os.path.join(chapter_dir, volume_folder)
         os.makedirs(volume_path, exist_ok=True)
         print(f"Created/Ensured directory: {volume_path}")
 
@@ -301,11 +281,12 @@ def main():
     parser = argparse.ArgumentParser(description="Organize manga chapter folders into volumes based on Wikipedia.")
     parser.add_argument("wiki_url", help="URL of the Wikipedia page listing manga chapters.")
     parser.add_argument("chapter_dir", help="Path to the directory containing chapter folders (e.g., 'Chapter 1', 'Chapter 2').")
+    parser.add_argument("--volume-prefix", default="Volume ", help="Prefix for volume folders (default: 'Volume ')")
     
     args = parser.parse_args()
 
     # STAGE 1: WIKIPEDIA DATA
-    volume_map_wiki = fetch_wikipedia_chapter_list(args.wiki_url)
+    volume_map_wiki = fetch_wikipedia_chapter_list(args.wiki_url, volume_prefix=args.volume_prefix)
     if not volume_map_wiki:
         print("Failed to get chapter list from Wikipedia. Exiting.")
         return
@@ -318,7 +299,6 @@ def main():
     # STAGE 2: LOCAL DATA
     local_chapters_raw, all_local_base_numbers = get_local_chapters(args.chapter_dir)
     if not local_chapters_raw:
-        # Message already printed by get_local_chapters if no folders found
         print("Exiting due to no local chapters found or directory issue.")
         return
 
@@ -331,7 +311,7 @@ def main():
 
     # STAGE 4: EXECUTION
     if folders_to_move_map:
-        organize_chapters(args.chapter_dir, folders_to_move_map)
+        organize_chapters(args.chapter_dir, folders_to_move_map, volume_prefix=args.volume_prefix)
     else:
         print("\nNo chapter organization will be performed (either cancelled or no chapters to move).")
 
