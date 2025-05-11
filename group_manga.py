@@ -203,7 +203,7 @@ def confirm_grouping_and_discrepancies(volume_map_wiki, local_chapters_raw, all_
             folders_sorted = sorted(folders, key=lambda f: float(re.search(r'([\d\.]+)', f).group(1)) if re.search(r'([\d\.]+)', f) else float('inf'))
             print(f"  For {vol} (based on their integer part): {', '.join(folders_sorted)}")
         
-        if confirm_user("Do you want to include these decimal chapters in the grouping as shown above?"):
+        if confirm_user("\nDo you want to include these decimal chapters in the grouping as shown above?"):
             for vol, folders in proposed_grouping_assignable.items():
                 final_folders_to_move[vol].extend(folders)
             print("Decimal chapters will be included in the grouping.")
@@ -215,7 +215,7 @@ def confirm_grouping_and_discrepancies(volume_map_wiki, local_chapters_raw, all_
     else:
         print("\nNo local chapters with assignable decimal numbers found.")
 
-    # --- NEW: Confirm grouping again after decimal chapters ---
+    # --- Confirm grouping again after decimal chapters ---
     print("\n--- Confirm Final Volume Grouping (Step 1b/2) ---")
     for vol_name, folders in sorted(final_folders_to_move.items(), key=lambda x: float(re.search(r'(\d+)', x[0]).group(1)) if re.search(r'(\d+)', x[0]) else float('inf')):
         folders_sorted = sorted(
@@ -223,7 +223,7 @@ def confirm_grouping_and_discrepancies(volume_map_wiki, local_chapters_raw, all_
             key=lambda f: float(re.search(r'([\d\.]+)', f).group(1)) if re.search(r'([\d\.]+)', f) else float('inf')
         )
         print(f"{vol_name}: {', '.join(folders_sorted)}")
-    if not confirm_user("Does the above final grouping look correct?"):
+    if not confirm_user("\nDoes the above final grouping look correct?"):
         print("Exiting based on user input.")
         return None
 
@@ -243,14 +243,17 @@ def confirm_grouping_and_discrepancies(volume_map_wiki, local_chapters_raw, all_
     else:
         print("\nINFO: All chapters listed on Wikipedia appear to have a corresponding local folder (based on integer part).")
 
-    # --- NEW: Bundle all unknown chapters into Volume 99 ---
+    # --- Prompt before bundling unknown chapters into Volume 99 ---
     if unknown_local_chapter_folders:
         vol99 = f"{volume_prefix}99"
         folders = list(unknown_local_chapter_folders.keys())
         folders_sorted = sorted(folders, key=lambda f: float(re.search(r'([\d\.]+)', f).group(1)) if re.search(r'([\d\.]+)', f) else float('inf'))
-        print(f"\nBundling all unknown/unassigned chapters into '{vol99}': {', '.join(folders_sorted)}")
-        for folder in folders_sorted:
-            final_folders_to_move[vol99].append(folder)
+        print(f"\nThe following chapters are unknown/unassigned and would be bundled into:\n{vol99}: {', '.join(folders_sorted)}")
+        if confirm_user(f"\nDo you want to group these chapters into '{vol99}'?"):
+            for folder in folders_sorted:
+                final_folders_to_move[vol99].append(folder)
+        else:
+            print("These chapters will NOT be grouped into Volume 99 and will remain ungrouped.")
     else:
         print("\nINFO: All found local chapters were either proposed for grouping or are not present.")
         
@@ -259,8 +262,18 @@ def confirm_grouping_and_discrepancies(volume_map_wiki, local_chapters_raw, all_
         return None
         
     print("\n--- Summary of Folders to be Moved ---")
-    for vol_name, folders in sorted(final_folders_to_move.items()):
-        folders_sorted = sorted(folders, key=lambda f: float(re.search(r'([\d\.]+)', f).group(1)) if re.search(r'([\d\.]+)', f) else float('inf'))
+    def extract_vol_num(vol_name):
+        # Extracts the first integer found in the volume name for sorting
+        match = re.search(r'(\d+)', vol_name)
+        return int(match.group(1)) if match else float('inf')
+
+    def extract_chap_num(chap_name):
+        # Extracts the first float found in the chapter name for sorting
+        match = re.search(r'([\d\.]+)', chap_name)
+        return float(match.group(1)) if match else float('inf')
+
+    for vol_name, folders in sorted(final_folders_to_move.items(), key=lambda x: extract_vol_num(x[0])):
+        folders_sorted = sorted(folders, key=extract_chap_num)
         print(f"{vol_name}: {', '.join(folders_sorted)}")
             
     if confirm_user("Proceed with creating volume folders and moving these chapters?"):
@@ -315,7 +328,7 @@ def main():
         return
     
     print_wikipedia_map(volume_map_wiki)
-    if not confirm_user("Does the Wikipedia chapter mapping look correct?"):
+    if not confirm_user("\nDoes the Wikipedia chapter mapping look correct?"):
         print("Exiting based on user input.")
         return
 
