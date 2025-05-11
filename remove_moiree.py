@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 import argparse
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- MOIRÉ REMOVAL & CALIBRATION SCRIPT FUNCTIONS ---
 
@@ -146,49 +147,52 @@ def is_grayscale(image_path):
         return True
     return False
 
-def process_images_in_folder(input_folder_path, output_folder_path):
+def process_single_image(input_path, output_path, output_dir):
+    try:
+        try:
+            with Image.open(input_path) as test_img:
+                test_img.verify()
+        except Exception:
+            print(f"  Skipping non-image or corrupted file: {os.path.basename(input_path)}")
+            if not os.path.exists(output_path) or \
+               os.path.getmtime(input_path) > os.path.getmtime(output_path):
+                shutil.copy2(input_path, output_path)
+            return
+
+        if is_grayscale(input_path):
+            print(f"Processing grayscale image: {os.path.basename(input_path)}")
+            process_and_save_moire_removed_image(input_path, output_path)
+        else:
+            print(f"  Non-grayscale image: {os.path.basename(input_path)}. Copying directly.")
+            if not os.path.exists(output_path) or \
+               os.path.getmtime(input_path) > os.path.getmtime(output_path):
+                shutil.copy2(input_path, output_path)
+                print(f"    Copied: {os.path.basename(input_path)} to {output_dir}")
+            else:
+                print(f"    Skipped copying {os.path.basename(input_path)}, output is newer or same.")
+    except Exception as e:
+        print(f"  Failed to process {os.path.basename(input_path)}: {e}")
+        import traceback
+        traceback.print_exc()
+
+def process_images_in_folder(input_folder_path, output_folder_path, max_workers=8):
+    jobs = []
     for root, dirs, files in os.walk(input_folder_path):
-        # Sort directories in-place for natural numeric order
         dirs.sort(key=natural_key)
-        # Compute the relative path from the input_folder_path
         rel_path = os.path.relpath(root, input_folder_path)
-        # Compute the corresponding output directory
         output_dir = os.path.join(output_folder_path, rel_path) if rel_path != '.' else output_folder_path
         os.makedirs(output_dir, exist_ok=True)
-
         sorted_filenames = sorted(files, key=natural_key)
         for filename in sorted_filenames:
             input_path = os.path.join(root, filename)
             output_path = os.path.join(output_dir, filename)
-
             if os.path.isfile(input_path):
-                print(f"Checking: {input_path}")
-                try:
-                    try:
-                        with Image.open(input_path) as test_img:
-                            test_img.verify()
-                    except Exception:
-                        print(f"  Skipping non-image or corrupted file: {filename}")
-                        if not os.path.exists(output_path) or \
-                           os.path.getmtime(input_path) > os.path.getmtime(output_path):
-                            shutil.copy2(input_path, output_path)
-                        continue
-
-                    if is_grayscale(input_path):
-                        print(f"Processing grayscale image: {filename}")
-                        process_and_save_moire_removed_image(input_path, output_path)
-                    else:
-                        print(f"  Non-grayscale image: {filename}. Copying directly.")
-                        if not os.path.exists(output_path) or \
-                           os.path.getmtime(input_path) > os.path.getmtime(output_path):
-                            shutil.copy2(input_path, output_path)
-                            print(f"    Copied: {filename} to {output_dir}")
-                        else:
-                            print(f"    Skipped copying {filename}, output is newer or same.")
-                except Exception as e:
-                    print(f"  Failed to process {filename}: {e}")
-                    import traceback
-                    traceback.print_exc()
+                jobs.append((input_path, output_path, output_dir))
+    # Parallel processing
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(process_single_image, inp, outp, outdir) for inp, outp, outdir in jobs]
+        for _ in as_completed(futures):
+            pass  # Just to ensure all tasks complete
 
 if __name__ == "__main__":
     cli_parser = argparse.ArgumentParser(description="Process images: moiré removal for grayscales, calibration, copy others.")
