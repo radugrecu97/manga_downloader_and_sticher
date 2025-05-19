@@ -95,7 +95,7 @@ def fetch_wikipedia_chapter_list(url, volume_prefix="Volume "):
     print(f"DEBUG: Successfully parsed {len(volume_map)} volumes. Final map keys: {list(volume_map.keys())}")
     return volume_map
 
-def get_local_chapters(chapter_dir):
+def get_local_chapters(chapter_dir, chapter_prefix="Chapter "):
     """
     Scans the directory for chapter folders and extracts their numbers.
     Returns a dictionary mapping original folder name to its float chapter number,
@@ -109,10 +109,14 @@ def get_local_chapters(chapter_dir):
     local_chapters_raw = {} # "Chapter 1": 1.0, "Chapter 2.5": 2.5
     local_chapter_base_numbers = set() # {1, 2}
 
+    # Build regex pattern using the chapter_prefix, escaping special regex chars
+    prefix_pattern = re.escape(chapter_prefix)
+    chapter_regex = re.compile(rf"{prefix_pattern}\s*([\d\.]+)", re.IGNORECASE)
+
     for item in os.listdir(chapter_dir):
         item_path = os.path.join(chapter_dir, item)
         if os.path.isdir(item_path) and not item.lower().startswith("volume"): # Avoid processing already created volume folders
-            match = re.match(r"Chapter\s*([\d\.]+)", item, re.IGNORECASE)
+            match = chapter_regex.match(item)
             if match:
                 try:
                     num_str = match.group(1)
@@ -318,6 +322,7 @@ def main():
     parser.add_argument("wiki_url", help="URL of the Wikipedia page listing manga chapters.")
     parser.add_argument("chapter_dir", help="Path to the directory containing chapter folders (e.g., 'Chapter 1', 'Chapter 2').")
     parser.add_argument("--volume-prefix", default="Volume ", help="Prefix for volume folders (default: 'Volume ')")
+    parser.add_argument("--chapter-prefix", default="Chapter ", help="Prefix for chapter folders (default: 'Chapter ')")
     
     args = parser.parse_args()
 
@@ -333,7 +338,7 @@ def main():
         return
 
     # STAGE 2: LOCAL DATA
-    local_chapters_raw, all_local_base_numbers = get_local_chapters(args.chapter_dir)
+    local_chapters_raw, all_local_base_numbers = get_local_chapters(args.chapter_dir, chapter_prefix=args.chapter_prefix)
     if not local_chapters_raw:
         print("Exiting due to no local chapters found or directory issue.")
         return
