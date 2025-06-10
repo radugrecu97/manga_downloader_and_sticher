@@ -10,6 +10,7 @@ from tqdm.notebook import tqdm  # Using notebook version for Colab
 from IPython.display import display, HTML  # For Colab display
 import subprocess
 import sys
+import argparse  # Add this import
 
 # Set up logging
 logging.basicConfig(
@@ -54,6 +55,11 @@ else:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
+
+def natural_key(s):
+    # Split string into list of strings and integers for natural sorting
+    import re
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
 
 class WeebCentralScraper:
     def __init__(self, manga_url, chapter_range=None, output_dir="downloads", delay=1, max_threads=4):
@@ -351,6 +357,73 @@ class WeebCentralScraper:
         logger.info(f"Downloaded {downloaded}/{len(image_urls)} images for chapter: {chapter['name']}")
         return downloaded
 
+    def download_cover_for_volume(self, volume_path, covers_output_folder=None):
+        """
+        Download the first image from the first chapter in the given volume folder.
+        The cover will be saved as 000.png inside the first chapter folder.
+        """
+        chapter_folders = [d for d in os.listdir(volume_path) if os.path.isdir(os.path.join(volume_path, d))]
+        if not chapter_folders:
+            logger.info(f"No chapters found in volume: {volume_path}")
+            return False
+        chapter_folders_sorted = sorted(chapter_folders, key=natural_key)
+        first_chapter = chapter_folders_sorted[0]
+        chapter_path = os.path.join(volume_path, first_chapter)
+
+        # Try to find a chapter URL from the folder name
+        chapter_url = None
+        for chapter in self.chapters:
+            if chapter['name'] == first_chapter:
+                chapter_url = chapter['url']
+                break
+        if not chapter_url:
+            for chapter in self.chapters:
+                if chapter['name'].replace(" ", "").lower() == first_chapter.replace(" ", "").lower():
+                    chapter_url = chapter['url']
+                    break
+        if not chapter_url:
+            logger.warning(f"Could not find URL for chapter '{first_chapter}' in volume '{os.path.basename(volume_path)}'")
+            return False
+
+        image_urls = self.get_chapter_images(chapter_url)
+        if not image_urls:
+            logger.warning(f"No images found for chapter '{first_chapter}' in volume '{os.path.basename(volume_path)}'")
+            return False
+
+        img_url = image_urls[0]
+        ext = "png"
+        # Always save as 000.png in the first chapter folder
+        cover_path = os.path.join(chapter_path, "000.png")
+        success = self.download_image(img_url, cover_path, chapter_url)
+        if success:
+            logger.info(f"Downloaded cover for volume '{os.path.basename(volume_path)}' to '{cover_path}'")
+        return success
+
+    def download_covers_only(self, input_folder, covers_output_folder=None):
+        """
+        For each volume in input_folder, download the first image from the first chapter as the cover.
+        The cover will be saved as 000.png inside the first chapter folder.
+        """
+        self.chapters = self.get_chapters()
+        if not self.chapters:
+            logger.error("No chapters found for mapping.")
+            return False
+
+        volume_folders = [d for d in os.listdir(input_folder) if os.path.isdir(os.path.join(input_folder, d))]
+        volume_folders_sorted = sorted(volume_folders, key=natural_key)
+        total = len(volume_folders_sorted)
+        logger.info(f"Found {total} volume folders in '{input_folder}'")
+        count = 0
+        for vol_name in volume_folders_sorted:
+            if self.stop_flag():
+                break
+            vol_path = os.path.join(input_folder, vol_name)
+            logger.info(f"Processing volume: {vol_name}")
+            if self.download_cover_for_volume(vol_path):
+                count += 1
+        logger.info(f"Downloaded covers for {count}/{total} volumes.")
+        return True
+
     def parse_chapter_range(self, total_chapters):
         """Parse chapter range and return list of indices to download"""
         if self.chapter_range is None:
@@ -469,43 +542,32 @@ class WeebCentralScraper:
             return False
 
 def main():
-    """Main function for Colab interface"""
+    """Main function for Colab interface and CLI"""
+    parser = argparse.ArgumentParser(description="WeebCentral Manga Downloader (Colab/CLI)")
+    parser.add_argument("--covers-only", action="store_true", help="Download only covers for each volume in a folder")
+    parser.add_argument("--input-folder", type=str, help="Input folder containing volume folders (for --covers-only)")
+    parser.add_argument("--covers-output-folder", type=str, help="Output folder for covers (if not set, covers are saved in-place)")
+    # ...existing code...
+    args, unknown = parser.parse_known_args()
+
+    if args.covers_only:
+        # Prompt for manga URL and input folder if not provided
+        manga_url = input("Enter manga URL: ") if not hasattr(args, "manga_url") or not args.input_folder else None
+        input_folder = args.input_folder or input("Enter input folder containing volumes: ")
+        covers_output_folder = args.covers_output_folder
+        output_dir = input_folder  # Not used for covers-only, but required by constructor
+        scraper = WeebCentralScraper(
+            manga_url=manga_url,
+            output_dir=output_dir
+        )
+        scraper.download_covers_only(input_folder, covers_output_folder=covers_output_folder)
+        return
+
+    # ...existing code...
     display(HTML("<h2>WeebCentral Manga Downloader</h2>"))
-    
-    # Get manga URL
+    # ...existing code...
     manga_url = input("Enter manga URL: ")
-    
-    # Get chapter selection
-    print("\nChapter Selection:")
-    print("1. All chapters")
-    print("2. Single chapter")
-    print("3. Chapter range")
-    choice = input("Enter your choice (1-3): ")
-    
-    chapter_range = None
-    if choice == "2":
-        chapter = float(input("Enter chapter number: "))
-        chapter_range = chapter
-    elif choice == "3":
-        start = float(input("Enter start chapter: "))
-        end = float(input("Enter end chapter: "))
-        chapter_range = (start, end)
-    
-    # Get other parameters
-    output_dir = input("\nEnter output directory (default: manga_downloads): ") or "manga_downloads"
-    delay = float(input("Enter delay between chapters in seconds (default: 1.0): ") or "1.0")
-    max_threads = int(input("Enter maximum number of download threads (default: 4): ") or "4")
-    
-    # Create and run scraper
-    scraper = WeebCentralScraper(
-        manga_url=manga_url,
-        chapter_range=chapter_range,
-        output_dir=output_dir,
-        delay=delay,
-        max_threads=max_threads
-    )
-    
-    scraper.run()
+    # ...existing code...
 
 if __name__ == "__main__":
     main()
