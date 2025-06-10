@@ -3,3 +3,5 @@ output
 out_folder
 covers
 epubs
+out_folder_*
+calibre
