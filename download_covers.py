@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 import re
 import time
 from urllib.parse import urljoin
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def natural_key(s):
     # Split string into list of ints and strs for natural sorting
@@ -51,61 +52,123 @@ def get_cover_img_url(soup):
             return img["src"]
     return None
 
+def prompt_confirm(prompt):
+    resp = input(f"{prompt} [y/N]: ").strip().lower()
+    return resp == "y" or resp == "yes"
+
+def fetch_cover_url(start_url, idx, max_volumes):
+    # Crawl from start_url, following next links, and collect cover URLs for each volume
+    covers = []
+    url = start_url
+    visited = set()
+    for i in range(max_volumes):
+        if not url or url in visited:
+            covers.append(None)
+            url = None
+            continue
+        visited.add(url)
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.content, "html.parser")
+            img_url = get_cover_img_url(soup)
+            covers.append(img_url)
+            url = find_next_url_comicvine(soup, url)
+        except Exception as e:
+            print(f"Failed to fetch {url}: {e}")
+            covers.append(None)
+            url = None
+    return covers
+
 def main():
     parser = argparse.ArgumentParser(description="Download volume covers by crawling ComicVine volume pages.")
-    parser.add_argument("folder", help="Folder to look for subfolders containing the keyword.")
+    parser.add_argument("manga_folder", help="Folder containing all volume folders (e.g., ./manga_downloads/Vagabond/)")
     parser.add_argument("keyword", help="Keyword to filter subfolders (e.g., 'Vol.')")
     parser.add_argument("start_url", help="Starting URL of the first volume page.")
-    parser.add_argument("--delay", type=float, default=1.0, help="Delay between requests (seconds)")
+    parser.add_argument("--delay", type=float, default=1.0, help="Delay between requests (seconds, only used for moving covers)")
+    parser.add_argument("--max_workers", type=int, default=8, help="Number of parallel downloads")
     args = parser.parse_args()
 
     covers_dir = os.path.join(os.getcwd(), "covers")
     os.makedirs(covers_dir, exist_ok=True)
 
-    # Find all subfolders containing the keyword, sorted by natural key
-    subfolders = sorted(
-        [f for f in os.listdir(args.folder)
-         if os.path.isdir(os.path.join(args.folder, f)) and args.keyword in f],
+    # Find all volume folders containing the keyword, sorted by natural key
+    volume_folders = sorted(
+        [f for f in os.listdir(args.manga_folder)
+         if os.path.isdir(os.path.join(args.manga_folder, f)) and args.keyword in f],
         key=natural_key
     )
-    print(f"Found {len(subfolders)} folders with keyword '{args.keyword}': {subfolders}")
+    print(f"Found {len(volume_folders)} folders with keyword '{args.keyword}': {volume_folders}")
 
-    url = args.start_url
-    visited = set()
-    idx = 0
+    # Crawl and collect all cover URLs in order
+    print("Collecting cover URLs...")
+    cover_urls = fetch_cover_url(args.start_url, 0, len(volume_folders))
 
-    while url and idx < len(subfolders):
-        if url in visited:
-            print("Detected loop or repeated URL, stopping.")
-            break
-        visited.add(url)
-        print(f"Processing: {url}")
+    # Download covers in parallel
+    print("Downloading covers in parallel...")
+    cover_paths = [None] * len(volume_folders)
+    cover_names = [None] * len(volume_folders)
+    with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+        futures = {}
+        for idx, img_url in enumerate(cover_urls):
+            if img_url:
+                ext = os.path.splitext(img_url)[1]
+                if not ext or len(ext) > 5:
+                    ext = ".png"
+                cover_name = f"{args.keyword} {idx+1}{ext}"
+                save_path = os.path.join(covers_dir, cover_name)
+                cover_names[idx] = cover_name
+                futures[executor.submit(download_image, img_url, save_path)] = (idx, save_path)
+            else:
+                cover_names[idx] = None
+                cover_paths[idx] = None
+        for future in as_completed(futures):
+            idx, save_path = futures[future]
+            cover_paths[idx] = save_path if os.path.exists(save_path) else None
 
-        try:
-            resp = requests.get(url, timeout=15)
-            resp.raise_for_status()
-        except Exception as e:
-            print(f"Failed to fetch {url}: {e}")
-            break
-
-        soup = BeautifulSoup(resp.content, "html.parser")
-        img_url = get_cover_img_url(soup)
-        if img_url:
-            # Use "<keyword> <idx+1>.jpg" as filename
-            ext = os.path.splitext(img_url)[1]
-            if not ext or len(ext) > 5:
-                ext = ".png"
-            cover_name = f"{args.keyword} {idx+1}{ext}"
-            save_path = os.path.join(covers_dir, cover_name)
-            download_image(img_url, save_path)
+    # For each volume folder, find the first chapter folder (sorted by natural key)
+    move_plan = []
+    for vol_idx, vol_folder in enumerate(volume_folders):
+        vol_path = os.path.join(args.manga_folder, vol_folder)
+        if not os.path.isdir(vol_path):
+            move_plan.append((None, None, None))
+            continue
+        chapter_folders = sorted(
+            [f for f in os.listdir(vol_path)
+             if os.path.isdir(os.path.join(vol_path, f))],
+            key=natural_key
+        )
+        if chapter_folders:
+            first_chapter = chapter_folders[0]
+            first_chapter_path = os.path.join(vol_path, first_chapter)
+            move_plan.append((cover_paths[vol_idx], first_chapter_path, vol_folder))
         else:
-            print("No cover image found on this page.")
+            move_plan.append((cover_paths[vol_idx], None, vol_folder))
 
-        # Find next URL in issue-slide
-        next_url = find_next_url_comicvine(soup, url)
-        url = next_url
-        idx += 1
-        time.sleep(args.delay)
+    # Print mapping
+    print("\nPlanned cover moves:")
+    for idx, (cover_path, chapter_path, vol_folder) in enumerate(move_plan):
+        if cover_path and chapter_path:
+            print(f"Cover {os.path.basename(cover_path)} -> {chapter_path}/000.png")
+        elif cover_path:
+            print(f"Cover {os.path.basename(cover_path)} -> [NO CHAPTER FOLDER in {vol_folder}]")
+        else:
+            print(f"[NO COVER] for {vol_folder}")
+
+    if not prompt_confirm("\nProceed with moving covers as above?"):
+        print("Aborted by user.")
+        return
+
+    # Move and rename covers
+    for cover_path, chapter_path, vol_folder in move_plan:
+        if cover_path and chapter_path:
+            dest_path = os.path.join(chapter_path, "000.png")
+            try:
+                os.makedirs(chapter_path, exist_ok=True)
+                os.replace(cover_path, dest_path)
+                print(f"Moved {os.path.basename(cover_path)} -> {dest_path}")
+            except Exception as e:
+                print(f"Failed to move cover to {dest_path}: {e}")
 
     print("Done.")
 
